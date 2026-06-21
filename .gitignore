@@ -1,0 +1,18 @@
+# Runtime Python env — created by scripts/setup.sh, never committed
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Editor output (created next to a user's video)
+edit/
+_ve_work/
+_caption_pngs/
+broll_assets/
+*.edited.mp4
+review.html
+
+# OS
+.DS_Store

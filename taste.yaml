@@ -1,0 +1,104 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  taste.yaml — YOUR editing style. Change ONE thing here, every future edit matches you.
+#
+#  This is the ONLY file you customize. The editor reads it before every job.
+#  Everything below has a sensible default, so it works great out of the box —
+#  but the moment you change a value, your next edit reflects it.
+#
+#  Not sure what something does? Leave it. Want a different look? Just edit the
+#  value and re-run. There is nothing to break here.
+# ════════════════════════════════════════════════════════════════════════════
+
+# Put your name + today's date here once you've made this yours.
+# (Until this says a real name, the editor treats the values below as the shipped example.)
+confirmed_by: ""        # e.g. "James (2026-06-16)"
+
+# ─── 1. CAPTIONS — the burned-in subtitles ───────────────────────────────────
+captions:
+  enabled: true
+  font: "HelveticaNeue-Bold"   # a font name OR a .ttc/.ttf path. "Helvetica", "Menlo", "Impact"…
+  size: 64                     # pixel height of caption text on a 1080-tall frame
+  case: "upper"                # "upper" (LOUD ad style) · "sentence" · "lower"
+  words_per_line: 3            # 2 = punchy ad cadence · 4–5 = calmer narrative
+  position: "lower"            # "lower" (~78% down, safe for Shorts UI) · "center" · "upper"
+  text_color: "#FFFFFF"
+  outline_color: "#000000"
+  outline_px: 6
+  # Emotion coloring — make pain words and money/proof words pop. Set highlight:false to disable.
+  highlight: true
+  pain_color: "#FF5A00"        # words like: lost, fail, struggle, broken, slow, manual, dead
+  money_color: "#22C55E"       # words like: $, %, scale, millions, saved, doubled, free, growth
+  # Words always force-spelled correctly in captions (ASR mishears these). Add your brand terms.
+  force_spelling:
+    "ris dial": "RizzDial"
+    "risdial": "RizzDial"
+    "rizz dial": "RizzDial"
+    "school": "Skool"          # only when you mean the platform; remove if you talk about real schools
+
+# ─── 2. CUTTING — how aggressively to tighten the talking head ────────────────
+cut:
+  remove_filler: true          # cut "um, uh, like, you know, I mean" and false starts
+  fillers: ["um", "uh", "uhh", "erm", "like", "you know", "i mean", "sort of", "kind of", "basically"]
+  aggressiveness: "medium"     # "gentle" (keep breathing room) · "medium" · "tight" (fast, punchy)
+  remove_silences_over_s: 1.2  # cut dead air longer than this many seconds (0 = keep all pauses)
+  cut_padding_ms: 80           # buffer kept around every cut so words never clip (60–200 is sane)
+  keep_peaks: true             # never cut laughs, punchlines, or emphatic moments
+
+# ─── 3. COLOR — the look ──────────────────────────────────────────────────────
+color:
+  grade: "auto"                # "auto" (smart, safe) · "subtle" · "neutral_punch" · "warm_cinematic" · "none"
+  # Or paste a raw ffmpeg filter to fully take over, e.g.:
+  # raw_filter: "eq=contrast=1.08:saturation=1.05"
+
+# ─── 4. BRAND CHROME — your logo / endcard / colors on the video ──────────────
+brand:
+  primary_color: "#FF5A00"
+  accent_color: "#22C55E"
+  logo_path: ""                # absolute path to a PNG with transparency (optional)
+  watermark: false             # show the logo small in a corner the whole video
+  watermark_corner: "br"       # br · bl · tr · tl
+  # Endcard shown for the last few seconds (great for Shorts CTAs).
+  endcard:
+    enabled: false
+    seconds: 3
+    headline: "Comment SCALE for the playbook"
+    background: "#0A0A0A"
+
+# ─── 5. B-ROLL TASTE — what footage to lay over your words ────────────────────
+# (Folded in from the b-roll-finder methodology. The editor NEVER guesses final
+#  picks on taste-risky beats — it shows you options. Objective beats it places.)
+broll:
+  enabled: true
+  audio: "silent"              # "silent" = strip b-roll sound (you talk over it) · "keep"
+  density: "medium"            # "light" (~10% coverage) · "medium" (~25%) · "heavy" (~50%)
+  place_lead_s: 0.2            # land the clip THIS many seconds after the word is spoken (never before)
+  stills_zoom: true            # subtle sub-pixel Ken Burns on still images (never shaky zoompan)
+  stills_zoom_rate: 0.015      # ~1.5% per second, capped ~2%
+  allow_memes: false           # agent never sources memes; you supply them from your own library
+  allow_ai_broll: false        # never auto-generate AI footage; real footage / receipts / graphics only
+  attribution: "auto"          # small source credit per clip: "off" · "white" · "black" · "auto"
+  # Trusted sources the search stays INSIDE (never random open YouTube). Tag by topic.
+  # Format: "@handle [topic] — note"  OR  "Channel Name [topic] — note"
+  trusted_sources:
+    - "@anthropic-ai [tech] — Anthropic official, authoritative for how-AI-works"
+    - "@OpenAI [tech] — model launches / demos"
+    - "WIRED [tech] — explainers"
+    - "Lenny's Podcast [business] — product & growth"
+    - "Leila Hormozi [business] — operator/business"
+  default_topic: "business"    # scopes the trusted-source list for a video with no explicit topic
+
+# ─── 6. SHORTS — vertical clips cut from the long video ───────────────────────
+shorts:
+  enabled: true
+  count: 3                     # how many shorts to pull from one long video
+  aspect: "9:16"               # "9:16" (Reels/TikTok/Shorts) · "1:1" · "4:5"
+  length_s: [20, 60]           # min/max seconds per short
+  # Shorts are chosen by a viral-hook rubric (curiosity gap, named enemy, surprising
+  # specific, contrarian take, confession, aspirational reveal, ICP call-out, taboo truth).
+  min_hook_score: 55           # 0–80; only clips scoring at/above this ship as shorts
+
+# ─── 7. OUTPUT ────────────────────────────────────────────────────────────────
+output:
+  resolution: "match"          # "match" source · "1080p" · "720p"
+  fps: "match"                 # "match" · 24 · 30
+  loudness_lufs: -14           # social-media standard; -14 is right for almost everyone
