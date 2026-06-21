@@ -53,14 +53,29 @@ def plan_cuts(transcript: dict, taste: dict) -> dict:
     sil_thresh = float(cut.get("remove_silences_over_s", 1.2)) * agg["silence_mult"]
     remove_silence = sil_thresh > 0
 
-    # 1) mark which words to DROP (filler). Keep everything else.
+    remove_stutter = cut.get("remove_stutter", True)
+
+    # 1) mark which words to DROP. Filler words, plus repeated-word stumbles
+    #    ("it's it's it's over" -> keep the last "it's"). Keep everything else.
     removed = []
     keep_flags = []
-    for w in words:
+    prev_norm = None
+    prev_kept_i = -1
+    for i, w in enumerate(words):
+        norm = re.sub(r"[^a-z']", "", w["text"].lower())
         drop = remove_filler and _is_filler(w["text"], fillers)
+        # stumble: same word as the immediately-preceding KEPT word, within 0.6s -> drop the earlier one
+        if (not drop and remove_stutter and norm and norm == prev_norm and len(norm) > 1
+                and prev_kept_i >= 0 and (w["start"] - words[prev_kept_i]["end"]) < 0.6):
+            keep_flags[prev_kept_i] = False
+            removed.append({"start": words[prev_kept_i]["start"], "end": words[prev_kept_i]["end"],
+                            "kind": "stutter", "text": words[prev_kept_i]["text"]})
         keep_flags.append(not drop)
         if drop:
             removed.append({"start": w["start"], "end": w["end"], "kind": "filler", "text": w["text"]})
+        else:
+            prev_norm = norm
+            prev_kept_i = i
 
     # 2) Walk only the KEPT words in order. The gap to the next kept word is the true
     #    silence (it already spans over any dropped filler words in between), so a long

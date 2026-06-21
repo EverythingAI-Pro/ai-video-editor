@@ -92,32 +92,61 @@ def edit_one(video: str, taste_path: str | None, out_dir: str | None,
             broll_plan_path = plan_path
         manifest["stages"]["broll"] = str(broll_plan_path)
 
-    # 4) render the main edit
+    # 4) render the main edit.
+    #    On LONG videos we skip captioning the FULL main edit by default: you post the Shorts
+    #    (which always get captioned), and burning captions across a 15-min video is slow and
+    #    rarely wanted. captions="on" forces it; captions="off" never captions.
+    try:
+        duration = float(json.loads(transcript_path.read_text()).get("duration", 0) or 0)
+    except Exception:
+        duration = 0.0
+    LONG_S = 240
+    caption_main = captions == "on" or (captions == "auto" and duration <= LONG_S)
     out_main = base_dir / f"{stem}.edited.mp4"
     rargs = [video, str(edl_path), str(out_main), "--transcript", str(transcript_path)]
     if broll_plan_path:
         rargs += ["--broll", str(broll_plan_path)]
     if taste_path:
         rargs += ["--taste", taste_path]
-    if captions == "off":
+    if not caption_main:
         rargs += ["--no-captions"]
     rr = _run_module("ve_render.py", *rargs)
-    manifest["stages"]["render"] = {"out": str(out_main), "log": rr.stdout.strip()}
+    manifest["stages"]["render"] = {"out": str(out_main), "captioned": caption_main,
+                                    "log": rr.stdout.strip()}
 
-    # 5) shorts
+    # 5) shorts — virality engine (audio energy + LLM ranker) is the primary picker;
+    #    falls back to the transcript-only hook rubric if audio analysis can't run.
     want_shorts = (do_shorts == "on") or (do_shorts == "taste" and taste.get("shorts", {}).get("enabled", True))
     if want_shorts and do_shorts != "off":
+        want_n = int(taste.get("shorts", {}).get("count", 3))
         shorts_json = base_dir / f"{stem}.shorts.json"
-        shargs = [str(transcript_path), str(shorts_json)]
-        if taste_path:
-            shargs += ["--taste", taste_path]
-        sh = _run_module("ve_shorts.py", "find", *shargs)
-        shorts_meta = json.loads(shorts_json.read_text())
+        clips = []
+        ranker = "rubric"
+        try:
+            vargs = [video, str(transcript_path), str(shorts_json), "--top", str(want_n)]
+            if taste_path:
+                vargs += ["--taste", taste_path]
+            _run_module("ve_virality.py", *vargs)
+            vmeta = json.loads(shorts_json.read_text())
+            clips = vmeta.get("clips", [])
+            ranker = vmeta.get("ranker", "audio")
+        except Exception as e:
+            manifest.setdefault("short_warnings", []).append(f"virality failed, using rubric: {e}")
+        if not clips:  # honest fallback
+            shargs = [str(transcript_path), str(shorts_json)]
+            if taste_path:
+                shargs += ["--taste", taste_path]
+            sh = _run_module("ve_shorts.py", "find", *shargs)
+            clips = json.loads(shorts_json.read_text()).get("shorts", [])
+            ranker = "rubric"
+
         rendered = []
-        for s in shorts_meta.get("shorts", []):
-            s_edl = base_dir / f"{stem}.short{s['index']}.edl.json"
-            s_edl.write_text(json.dumps(s["edl"], indent=2))
-            s_out = base_dir / f"{stem}.short{s['index']}.mp4"
+        for i, s in enumerate(clips):
+            edl = s.get("edl") or {"ranges": [{"source_start": s["source_start"],
+                                               "source_end": s["source_end"], "out_offset": 0.0}]}
+            s_edl = base_dir / f"{stem}.short{i}.edl.json"
+            s_edl.write_text(json.dumps(edl, indent=2))
+            s_out = base_dir / f"{stem}.short{i}.mp4"
             sr = [video, str(s_edl), str(s_out), "--transcript", str(transcript_path)]
             if taste_path:
                 sr += ["--taste", taste_path]
@@ -127,7 +156,7 @@ def edit_one(video: str, taste_path: str | None, out_dir: str | None,
             except Exception as e:
                 manifest.setdefault("short_warnings", []).append(str(e))
         manifest["stages"]["shorts"] = {"meta": str(shorts_json), "rendered": rendered,
-                                        "summary": sh.stdout.strip()}
+                                        "ranker": ranker, "count": len(rendered)}
 
     # 6) publish layer — post pack (captions/hooks/hashtags) + a beautiful HTML review page
     if publish != "off":
@@ -161,7 +190,8 @@ def main() -> int:
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--broll", choices=["auto", "off", "taste"], default="taste")
     ap.add_argument("--shorts", choices=["on", "off", "taste"], default="taste")
-    ap.add_argument("--captions", choices=["on", "off"], default="on")
+    ap.add_argument("--captions", choices=["on", "off", "auto"], default="auto",
+                    help="auto = caption short videos + all Shorts, skip the full long main edit")
     ap.add_argument("--publish", choices=["on", "off"], default="on",
                     help="also build the post pack + HTML review page (default on)")
     ap.add_argument("--from-transcript", default=None)

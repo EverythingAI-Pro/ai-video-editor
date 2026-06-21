@@ -32,7 +32,7 @@ Editing video is the #1 bottleneck between a founder and consistent content. Hir
 | 🎞️ **Finds + places B-roll** | Classifies each moment (receipt / entity / concept), sources it from sources you trust, and lays it **on the word being spoken**. |
 | 🎨 **Color grades** | Auto, subtle, punch, or cinematic — or your own look. |
 | 💬 **Burns captions** | Bold, readable captions with **pain words in orange, money words in green** — the style that stops scroll. Auto-fits so text never clips on vertical. |
-| 📱 **Makes Shorts** | Scores your long video with an 8-pattern viral-hook rubric and cuts the best 9:16 clips. |
+| 📱 **Finds the viral moments** | Scores every moment by **how it's delivered** — audio energy spikes, laughter, dramatic pauses — not just the words, then an LLM picks the clips that would actually perform (rejecting stumbles and mid-thoughts) and cuts them into Shorts. |
 | 📝 **Writes the captions to post** | Per-platform caption + hook + hashtags for TikTok, Reels, YouTube Shorts, X, and LinkedIn. |
 | 🌐 **Builds a review page** | A beautiful HTML page: every clip playable, copy-paste captions per platform, posting checklist. Double-click to open. |
 | 🤖 **Runs on autopilot** | Drop videos in a folder → edited videos + Shorts + post copy come out. |

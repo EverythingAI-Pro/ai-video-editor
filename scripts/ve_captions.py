@@ -226,51 +226,69 @@ def _draw_outlined(draw, pos, text, font, fill, outline, w):
     draw.text((x, y), text, font=font, fill=fill)
 
 
-# ── burn caption PNGs onto a video ──
-def burn(in_mp4: str, lines: list[dict], taste: dict, out_mp4: str) -> None:
-    if not lines:
-        # nothing to do — copy through
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", in_mp4, "-c", "copy", out_mp4], check=True)
-        return
-    from ve_ffmpeg import probe  # local import to keep module importable standalone
+CAPTION_BATCH = 40  # ffmpeg can't take hundreds of PNG inputs in one command (fd / stream limit)
 
-    meta = probe(in_mp4)
-    cw, ch = meta["width"], meta["height"]
-    caps = taste.get("captions", {})
-    position = caps.get("position", "lower")
-    work = Path(out_mp4).parent / "_caption_pngs"
-    work.mkdir(parents=True, exist_ok=True)
 
+def _caption_y(position: str) -> str:
+    if position == "center":
+        return "(H-h)/2"
+    if position == "upper":
+        return "H*0.18"
+    return "H*0.74"  # lower — safe above Shorts UI
+
+
+def _burn_batch(in_mp4: str, lines: list[dict], taste: dict, cw: int, position: str,
+                work: Path, out_mp4: str, base_idx: int) -> None:
+    """Burn up to CAPTION_BATCH caption lines onto in_mp4 in a single ffmpeg pass."""
     inputs = ["-i", in_mp4]
     filt = []
     cur = "[0:v]"
-    for idx, line in enumerate(lines):
-        png = str(work / f"cap_{idx:04d}.png")
-        w, h = render_line_png(line, taste, cw, png)
+    for j, line in enumerate(lines):
+        png = str(work / f"cap_{base_idx + j:05d}.png")
+        render_line_png(line, taste, cw, png)
         inputs += ["-i", png]
-        if position == "center":
-            y = "(H-h)/2"
-        elif position == "upper":
-            y = "H*0.18"
-        else:  # lower — ~78% down, safe above Shorts UI
-            y = "H*0.74"
-        nxt = f"[v{idx}]"
+        nxt = f"[v{j}]"
         filt.append(
-            f"{cur}[{idx + 1}:v]overlay=x=(W-w)/2:y={y}:"
+            f"{cur}[{j + 1}:v]overlay=x=(W-w)/2:y={_caption_y(position)}:"
             f"enable='between(t,{line['start']:.3f},{line['end']:.3f})'{nxt}"
         )
         cur = nxt
-    fc = ";".join(filt)
-    last = cur
     cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
-        "-filter_complex", fc,
-        "-map", last, "-map", "0:a?",
+        "-filter_complex", ";".join(filt),
+        "-map", cur, "-map", "0:a?",
         "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-c:a", "copy", "-movflags", "+faststart", out_mp4,
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"caption burn failed:\n{r.stderr[-1500:]}")
+
+
+# ── burn caption PNGs onto a video (batched so it scales to long videos) ──
+def burn(in_mp4: str, lines: list[dict], taste: dict, out_mp4: str) -> None:
+    if not lines:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", in_mp4, "-c", "copy", out_mp4], check=True)
+        return
+    from ve_ffmpeg import probe  # local import to keep module importable standalone
+
+    meta = probe(in_mp4)
+    cw = meta["width"]
+    position = taste.get("captions", {}).get("position", "lower")
+    work = Path(out_mp4).parent / "_caption_pngs"
+    work.mkdir(parents=True, exist_ok=True)
+
+    # One pass when small; otherwise batch over intermediates so ffmpeg never sees too many inputs.
+    batches = [lines[i:i + CAPTION_BATCH] for i in range(0, len(lines), CAPTION_BATCH)]
+    src = in_mp4
+    tmps = []
+    for bi, batch in enumerate(batches):
+        dst = out_mp4 if bi == len(batches) - 1 else str(work / f"_pass_{bi:03d}.mp4")
+        _burn_batch(src, batch, taste, cw, position, work, dst, bi * CAPTION_BATCH)
+        if bi > 0:
+            tmps.append(src)
+        src = dst
+    for t in tmps:
+        Path(t).unlink(missing_ok=True)
 
 
 def main() -> int:

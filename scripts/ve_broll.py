@@ -50,15 +50,58 @@ CONCEPT_CUES = re.compile(r"\b(how it works|the process|imagine|think of|funnel|
                           r"step one|step two|framework|system)\b", re.I)
 
 
-_STOP_CAPS = {"we", "i", "the", "a", "an", "and", "but", "so", "it", "they", "you", "he",
-              "she", "this", "that", "our", "my", "your", "their", "just", "like", "when",
-              "as", "if", "then", "now", "how", "what", "why", "with", "for", "to"}
+# Common English words that get capitalized at sentence start but are NOT entities.
+# A capitalized word in this set is never treated as a b-roll target on its own.
+_COMMON_CAPS = {
+    "the", "a", "an", "and", "but", "so", "or", "if", "then", "now", "we", "i", "it", "they",
+    "you", "he", "she", "this", "that", "these", "those", "our", "my", "your", "their", "his",
+    "her", "its", "just", "like", "when", "as", "with", "for", "to", "of", "in", "on", "at",
+    "by", "from", "up", "out", "no", "not", "yes", "okay", "ok", "well", "right", "look", "see",
+    "let", "get", "go", "going", "make", "made", "do", "did", "done", "here", "there", "what",
+    "why", "how", "who", "which", "where", "last", "first", "next", "one", "two", "three", "four",
+    "five", "many", "some", "all", "every", "each", "more", "most", "very", "really", "actually",
+    "basically", "literally", "offer", "thing", "things", "way", "ways", "people", "person",
+    "today", "yesterday", "tomorrow", "week", "month", "year", "day", "time", "lot", "kind",
+    "sort", "bit", "stuff", "guys", "guy", "everyone", "everybody", "nobody", "something",
+    "anything", "nothing", "because", "before", "after", "once", "again", "always", "never",
+}
+
+# Brands / tools / platforms that ARE worth sourcing b-roll for (extend in taste later).
+_KNOWN_ENTITIES = re.compile(
+    r"\b(GHL|GoHighLevel|RizzDial|ChatGPT|Claude|Anthropic|OpenAI|Google|YouTube|TikTok|Instagram|"
+    r"Meta|Facebook|Stripe|Notion|Slack|Zapier|Make|HubSpot|Salesforce|Shopify|Twilio|"
+    r"DataForSEO|Firecrawl|Ahrefs|Semrush|Apollo|Calendly|Zoom|Loom|Figma|Canva|Cursor|VSCode)\b",
+    re.I,
+)
 
 
 def _proper_nouns(text: str) -> list[str]:
-    """Capitalized words that aren't sentence-initial filler — the real entities in a line."""
-    found = re.findall(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\b", text)
-    return [w for w in found if w.split()[0].lower() not in _STOP_CAPS]
+    """Real entities worth sourcing b-roll for — not every capitalized word.
+
+    Order of trust: known brands/tools > multi-word capitalized phrases > a lone capitalized
+    word that ISN'T a common English word. This stops it picking 'Last', 'Three', 'Offer'.
+    """
+    out: list[str] = []
+    # 1) known brands/tools (highest signal)
+    for m in _KNOWN_ENTITIES.finditer(text):
+        out.append(m.group(0))
+    # 2) multi-word capitalized phrases ("Data For SEO", "John Kim")
+    for m in re.finditer(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)\b", text):
+        phrase = m.group(1)
+        if phrase not in out:
+            out.append(phrase)
+    # 3) lone capitalized words that aren't common English words
+    for m in re.finditer(r"\b([A-Z][a-zA-Z]{2,})\b", text):
+        w = m.group(1)
+        if w.lower() not in _COMMON_CAPS and w not in out and not any(w in p.split() for p in out):
+            out.append(w)
+    # de-dupe preserving order
+    seen, dedup = set(), []
+    for w in out:
+        if w.lower() not in seen:
+            seen.add(w.lower())
+            dedup.append(w)
+    return dedup
 
 
 def _route_for(text: str) -> tuple[str, str]:
@@ -154,18 +197,30 @@ def plan(transcript: dict, edl: dict, taste: dict) -> dict:
                     "meme/taste beats need your library."}
 
 
+def _parse_yt(stdout: str) -> list[dict]:
+    out = []
+    for line in stdout.strip().splitlines():
+        parts = line.split("|||")
+        if len(parts) == 3 and parts[2]:
+            out.append({"title": parts[0], "duration": parts[1], "id": parts[2]})
+    return out
+
+
 def _yt_search_in_channel(handle: str, query: str, n: int = 3) -> list[dict]:
     """Channel-scoped search (the default for Entity beats). Metadata only."""
     url = f"https://www.youtube.com/{handle}/search?query={query.replace(' ', '+')}"
     r = subprocess.run(["yt-dlp", url, "--flat-playlist", "--playlist-end", str(n),
                         "--print", "%(title).80s|||%(duration)s|||%(id)s"],
                        capture_output=True, text=True)
-    out = []
-    for line in r.stdout.strip().splitlines():
-        parts = line.split("|||")
-        if len(parts) == 3 and parts[2]:
-            out.append({"title": parts[0], "duration": parts[1], "id": parts[2]})
-    return out
+    return _parse_yt(r.stdout)
+
+
+def _yt_search_open(query: str, n: int = 3) -> list[dict]:
+    """Open YouTube search — the flagged last resort when no trusted channel matches."""
+    r = subprocess.run(["yt-dlp", f"ytsearch{n}:{query}", "--flat-playlist",
+                        "--print", "%(title).80s|||%(duration)s|||%(id)s"],
+                       capture_output=True, text=True)
+    return _parse_yt(r.stdout)
 
 
 def source(plan_obj: dict, assets_dir: Path, taste: dict) -> dict:
@@ -184,13 +239,23 @@ def source(plan_obj: dict, assets_dir: Path, taste: dict) -> dict:
             if m:
                 handle = m.group(1)
                 break
-        if not handle or not b.get("search"):
-            b["flag"] = "no trusted source matched — drop or supply manually"
+        query = b.get("search") or b.get("keyword")
+        if not query:
+            b["flag"] = "no searchable keyword — supply manually"
             out_beats.append(b)
             continue
-        hits = _yt_search_in_channel(handle, b["search"], n=3)
+
+        hits, source_label = [], None
+        if handle:
+            hits = _yt_search_in_channel(handle, query, n=3)
+            source_label = handle
+        # Flagged last resort: open search when no trusted channel matched or it returned nothing.
+        allow_open = broll.get("allow_open_search", True)
+        if not hits and allow_open:
+            hits = _yt_search_open(query, n=3)
+            source_label = "⚠️ open search (outside trusted sources)"
         if not hits:
-            b["flag"] = f"no result in {handle} (not retried) — dropped"
+            b["flag"] = "no result (not retried) — dropped"
             out_beats.append(b)
             continue
         vid = hits[0]["id"]
@@ -202,11 +267,11 @@ def source(plan_obj: dict, assets_dir: Path, taste: dict) -> dict:
             capture_output=True, text=True)
         found = next(iter(sorted(assets_dir.glob(f"beat_{i:03d}.*"))), None)
         if dl.returncode != 0 or not found:
-            b["flag"] = f"download failed in {handle} (not retried) — dropped"
+            b["flag"] = f"download failed from {source_label} (not retried) — dropped"
             out_beats.append(b)
             continue
         b["asset"] = str(found)
-        b["source"] = handle
+        b["source"] = source_label
         b["src_in"] = 0.5  # skip a beat of intro
         out_beats.append(b)
     placed = sum(1 for b in out_beats if b.get("asset"))

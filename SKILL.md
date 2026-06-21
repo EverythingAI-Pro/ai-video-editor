@@ -55,7 +55,7 @@ Run scripts with the skill's venv python. All of them are taste-driven via `--ta
 | 3. B-roll plan | `ve_broll.py plan <transcript> <edl> <plan.json>` | Classifies beats (Receipts/Entity/Concept), proposes what to source + where. |
 | 3b. B-roll source | `ve_broll.py source <plan> <assets_dir> <sourced.json>` | Fetches ONE clip per objective beat, scoped to trusted sources. |
 | 4. Render | `ve_render.py <video> <edl> <out.mp4> --transcript <t> [--broll <plan>]` | Cut → grade → place b-roll → burn captions → endcard → loudness. |
-| 5. Shorts | `ve_shorts.py find <transcript> <shorts.json>` | Scores windows by the viral-hook rubric → top vertical clips. |
+| 5. Find viral clips | `ve_virality.py <video> <transcript> <out.json> --top N` | PRIMARY Shorts picker: scores by audio delivery (energy/laughter/pause) + 8-pattern hook rubric, then an LLM ranks the finalists and rejects stumbles. `--no-llm` for audio-only. Falls back to `ve_shorts.py` (rubric) if audio can't be analyzed. |
 | 6. Post pack | `ve_postpack.py <transcript> <shorts.json> <postpack.json>` | Per-platform caption + hook + hashtags (TikTok/Reels/Shorts/X/LinkedIn). |
 | 7. Review page | `ve_publish.py <out.html> --main <edited.mp4> --short <s.mp4> --postpack <p.json>` | Beautiful HTML page: clips playable + copy-paste captions + posting checklist. |
 | 8. Post (optional) | `ve_post.py plan\|buffer\|webhook <postpack.json>` | OPTIONAL auto-scheduling via Buffer / webhook (needs the founder's own keys). Off by default. |

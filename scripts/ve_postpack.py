@@ -99,14 +99,18 @@ def build_pack(transcript: dict, shorts: dict, taste: dict) -> dict:
     niche_tags = []  # founders can extend taste later; keep generic + honest for now
     items = []
 
-    # one "post" per short, plus a main-video post
+    # one "post" per short, plus a main-video post.
+    # accepts both the virality engine output ({"clips":[...]}) and the rubric output ({"shorts":[...]}).
     main_text = " ".join(w["text"] for w in transcript.get("words", []))[:600]
     sources = [{"id": "main", "label": "Main video", "text": main_text, "patterns": []}]
-    for s in shorts.get("shorts", []):
+    short_list = shorts.get("clips") or shorts.get("shorts") or []
+    for i, s in enumerate(short_list):
+        idx = s.get("rank", s.get("index", i))
+        score = s.get("viral_score", s.get("hook_score", 0))
         sources.append({
-            "id": f"short{s['index']}",
-            "label": f"Short #{s['index']} ({s.get('hook_score', 0)} hook)",
-            "text": s.get("transcript_excerpt", ""),
+            "id": f"short{idx}",
+            "label": f"Short #{idx} ({score} score)",
+            "text": s.get("text_full") or s.get("transcript_excerpt", ""),
             "patterns": s.get("hook_patterns", []),
         })
 
