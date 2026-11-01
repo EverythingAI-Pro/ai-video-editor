@@ -52,8 +52,8 @@ case "${1:-}" in
       --include='*/' \
       --include='*.mp4' \
       --include='*.html' \
-      --exclude='_ve_work/' \
       --include='*.json' \
+      --exclude='_ve_work/' \
       --exclude='*' \
       "$REMOTE_USER@$REMOTE_HOST:$REMOTE_ROOT/03_POSTIZ_UPLOAD/" "$ROOT/content-system/03_POSTIZ_UPLOAD/"
     printf '\nFinished content is in:\n  %s\n  %s\n' "$ROOT/content-system/02_READY" "$ROOT/content-system/03_POSTIZ_UPLOAD"
