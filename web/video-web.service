@@ -1,0 +1,23 @@
+# AI Video Editor Web Dashboard — systemd user unit
+# Path on AI1: ~/.config/systemd/user/video-web.service
+# Set a strong VIDEO_WEB_PASSWORD before installing.
+
+[Unit]
+Description=AI Video Editor Web Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyrusminer/content-engine
+Environment=PYTHONUNBUFFERED=1
+Environment=CONTENT_ROOT=/home/cyrusminer/content-system
+Environment=HOST=100.123.141.71
+Environment=PORT=4010
+Environment=VIDEO_WEB_PASSWORD=CHANGE_ME
+ExecStart=/home/cyrusminer/content-engine/ai-video-editor/.venv/bin/python /home/cyrusminer/content-engine/video_web.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,24 @@
+# Content pipeline autopilot — systemd user unit
+# Path on AI1: ~/.config/systemd/user/content-editor.service
+
+[Unit]
+Description=AI Content Pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyrusminer/content-engine
+Environment=PYTHONUNBUFFERED=1
+Environment=AI_EDITOR_REPO=/home/cyrusminer/content-engine/ai-video-editor
+Environment=CONTENT_ROOT=/home/cyrusminer/content-system
+Environment=WHISPER_MODEL=small
+Environment=WHISPER_DEVICE=cuda
+Environment=WHISPER_COMPUTE=float16
+Environment=BROLL_MODE=off
+ExecStart=/home/cyrusminer/content-engine/ai-video-editor/.venv/bin/python /home/cyrusminer/content-engine/content_pipeline_watch.py --interval 30 --taste /home/cyrusminer/content-engine/ai-video-editor/taste.yaml --broll off
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
