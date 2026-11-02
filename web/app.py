@@ -7,11 +7,10 @@ Web front-end for the AI1 content pipeline:
 Features:
   - Password login (signed cookie)
   - Upload raw videos (autopilot picks them up within ~30s)
+  - Optional Creative Direction brief + platform pick per upload (routes to studio)
   - Live pipeline status per job
   - Play outputs, open review.html, read post-pack copy, download files
   - Retry failed jobs / force re-edit
-
-Runs on AI1 as video-web.service (see web/video-web.service).
 """
 from __future__ import annotations
 
@@ -175,13 +174,16 @@ def jobs() -> list[dict]:
             e["ready"] = d
             done = d / f"{d.name}.done"
             failed = d / f"{d.name}.failed"
-            if failed.exists():
+            sdone = d / "studio" / "studio.done"
+            sfail = d / "studio" / "studio.failed"
+            if failed.exists() or sfail.exists():
                 e["status"] = "failed"
-                e["failed"] = failed.read_text(encoding="utf-8", errors="replace")[-400:]
-                e["updated"] = max(e["updated"], _mtime(failed))
-            elif done.exists():
+                src = failed if failed.exists() else sfail
+                e["failed"] = src.read_text(encoding="utf-8", errors="replace")[-400:]
+                e["updated"] = max(e["updated"], _mtime(src))
+            elif done.exists() or sdone.exists():
                 e["status"] = "ready"
-                e["updated"] = max(e["updated"], _mtime(done))
+                e["updated"] = max(e["updated"], _mtime(done if done.exists() else sdone))
             else:
                 e["status"] = "processing"
                 e["updated"] = max(e["updated"], _mtime(d))
@@ -284,7 +286,9 @@ async def dashboard():
  <input type=file id=uf multiple accept="video/*">
  <div style="font-size:26px">⬆️</div>
  <div style="margin:8px 0 2px;font-weight:600">Drop raw videos here (or click to choose)</div>
- <div style="font-size:12px">They land in <code>01_RAW</code> — the autopilot edits them automatically (~30s pickup)</div>
+ <div style="font-size:12px">Uploading starts a full studio production job automatically</div>
+ <textarea id=ubrief placeholder="Creative direction (optional). Paste a Kimi strategy here, or leave empty for fully automatic." style="margin-top:14px;width:100%;box-sizing:border-box;min-height:64px;background:#0e1114;border:1px solid #2b313a;border-radius:10px;color:#e8eaed;padding:10px;font-size:13px;font-family:inherit"></textarea>
+ <div style="margin-top:10px;font-size:12px;color:var(--mut)">Platforms (optional): <label><input type=checkbox class=upf value=youtube checked> YouTube</label> <label><input type=checkbox class=upf value=x checked> X</label> <label><input type=checkbox class=upf value=telegram checked> Telegram</label> <label><input type=checkbox class=upf value=mastodon checked> Mastodon</label> <label><input type=checkbox class=upf value=hashnode> Hashnode</label> <label><input type=checkbox class=upf value=nostr> Nostr</label></div>
  <div id=uprog style="margin-top:10px;font-size:13px;color:#5ee0a0"></div>
 </label>
 <script>
@@ -293,8 +297,12 @@ async function send(files){
  for(const f of files){
   pr.textContent='Uploading '+f.name+' …';
   const fd=new FormData(); fd.append('file',f);
+  const b=document.getElementById('ubrief').value.trim();
+  const pl=[...document.querySelectorAll('.upf:checked')].map(x=>x.value).join(',');
+  if(b) fd.append('brief',b);
+  if(pl) fd.append('platforms',pl);
   const r=await fetch('/upload',{method:'POST',body:fd});
-  pr.textContent = r.ok ? ('Queued: '+f.name+' ✓') : ('FAILED: '+f.name);
+  pr.textContent = r.ok ? ('Production job started: '+f.name+' ✓') : ('FAILED: '+f.name);
  }
  setTimeout(()=>location.reload(), 800);
 }
@@ -424,7 +432,7 @@ async def job_retry(name: str):
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), brief: str = Form(""), platforms: str = Form("")):
     name = Path(file.filename or "upload.mp4").name
     if Path(name).suffix.lower() not in VIDEO_EXT:
         return JSONResponse({"error": "not a video file"}, status_code=400)
@@ -437,7 +445,13 @@ async def upload(file: UploadFile = File(...)):
         i += 1
     with dest.open("wb") as fh:
         shutil.copyfileobj(file.file, fh)
-    return {"queued": dest.name}
+    # studio job markers (content-studio watcher picks this up)
+    (RAW / f"{dest.stem}.studio").write_text("web\n")
+    if brief.strip():
+        (RAW / f"{dest.stem}.brief.txt").write_text(brief.strip(), encoding="utf-8")
+    if platforms.strip():
+        (RAW / f"{dest.stem}.platforms.txt").write_text(platforms.strip(), encoding="utf-8")
+    return {"queued": dest.name, "mode": "studio"}
 
 
 @app.get("/files/{path:path}")
