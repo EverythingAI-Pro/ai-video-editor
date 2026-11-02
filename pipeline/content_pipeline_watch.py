@@ -4,8 +4,6 @@
 Outputs:
   ~/content-system/02_READY/<video-name>/
   ~/content-system/03_POSTIZ_UPLOAD/<video-name>/
-
-Runs on AI1 as content-editor.service (see pipeline/content-editor.service).
 """
 from __future__ import annotations
 
@@ -191,6 +189,8 @@ def scan(taste: Path | None, broll: str) -> int:
     processed = 0
     for video in sorted(RAW.iterdir()):
         if video.is_file() and video.suffix.lower() in VIDEO_EXT and not video.name.startswith("."):
+            if (RAW / f"{video.stem}.studio").exists():
+                continue  # routed to the studio pipeline instead
             if process(video, taste, broll):
                 processed += 1
     return processed
