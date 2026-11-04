@@ -7,7 +7,6 @@ Web front-end for the AI1 content pipeline:
 Features:
   - Password login (signed cookie)
   - Upload raw videos (autopilot picks them up within ~30s)
-  - Optional Creative Direction brief + platform pick per upload (routes to studio)
   - Live pipeline status per job
   - Play outputs, open review.html, read post-pack copy, download files
   - Retry failed jobs / force re-edit
@@ -19,8 +18,10 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -39,7 +40,9 @@ SECRET = os.environ.get("VIDEO_WEB_SECRET") or hashlib.sha256(PASSWORD.encode())
 COOKIE = "ve_session"
 SESSION_TOKENS: set[str] = set()
 
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
+VIDEO_EXT = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm",
+             ".3gp", ".wmv", ".flv", ".m2ts", ".mpeg", ".mpg"}
+CHUNK_DIR = CONTENT_ROOT / "_chunks"
 
 app = FastAPI(title="AI Video Editor", docs_url=None, redoc_url=None)
 
@@ -289,22 +292,43 @@ async def dashboard():
  <div style="font-size:12px">Uploading starts a full studio production job automatically</div>
  <textarea id=ubrief placeholder="Creative direction (optional). Paste a Kimi strategy here, or leave empty for fully automatic." style="margin-top:14px;width:100%;box-sizing:border-box;min-height:64px;background:#0e1114;border:1px solid #2b313a;border-radius:10px;color:#e8eaed;padding:10px;font-size:13px;font-family:inherit"></textarea>
  <div style="margin-top:10px;font-size:12px;color:var(--mut)">Platforms (optional): <label><input type=checkbox class=upf value=youtube checked> YouTube</label> <label><input type=checkbox class=upf value=x checked> X</label> <label><input type=checkbox class=upf value=telegram checked> Telegram</label> <label><input type=checkbox class=upf value=mastodon checked> Mastodon</label> <label><input type=checkbox class=upf value=hashnode> Hashnode</label> <label><input type=checkbox class=upf value=nostr> Nostr</label></div>
+ <div style="margin-top:8px;font-size:12px;color:var(--mut)"><label><input type=checkbox id=umix> Mix short clips (2-15s) into one branded video (needs 2+ clips)</label></div>
  <div id=uprog style="margin-top:10px;font-size:13px;color:#5ee0a0"></div>
 </label>
 <script>
 const uz=document.getElementById('uz'), uf=document.getElementById('uf'), pr=document.getElementById('uprog');
-async function send(files){
- for(const f of files){
-  pr.textContent='Uploading '+f.name+' …';
-  const fd=new FormData(); fd.append('file',f);
-  const b=document.getElementById('ubrief').value.trim();
-  const pl=[...document.querySelectorAll('.upf:checked')].map(x=>x.value).join(',');
-  if(b) fd.append('brief',b);
-  if(pl) fd.append('platforms',pl);
-  const r=await fetch('/upload',{method:'POST',body:fd});
-  pr.textContent = r.ok ? ('Production job started: '+f.name+' ✓') : ('FAILED: '+f.name);
+const CHUNK=8*1024*1024;
+async function sendOne(f,b,pl,mx){
+ const u=(crypto.randomUUID&&crypto.randomUUID())||('u'+Date.now()+Math.random());
+ const n=Math.max(1,Math.ceil(f.size/CHUNK));
+ let ok=true;
+ for(let i=0;i<n;i++){
+  let done=false;
+  for(let t=0;t<3&&!done;t++){
+   const fd=new FormData();
+   fd.append('uuid',u); fd.append('index',i);
+   fd.append('file',f.slice(i*CHUNK,Math.min(f.size,(i+1)*CHUNK)),f.name+'.part');
+   try{ const r=await fetch('/upload/chunk',{method:'POST',body:fd}); done=r.ok; }catch(e){ done=false; }
+   if(!done) await new Promise(s=>setTimeout(s,1500));
+  }
+  if(!done){ ok=false; break; }
+  pr.textContent='Uploading '+f.name+' … '+(i+1)+'/'+n+' ('+Math.round(f.size/1048576)+' MB)';
  }
- setTimeout(()=>location.reload(), 800);
+ if(!ok){ pr.textContent='FAILED: '+f.name+' (network) — try again'; return; }
+ const fd=new FormData();
+ fd.append('uuid',u); fd.append('filename',f.name);
+ if(b) fd.append('brief',b); if(pl) fd.append('platforms',pl); if(mx) fd.append('mix','1');
+ try{
+  const r=await fetch('/upload/complete',{method:'POST',body:fd});
+  pr.textContent = r.ok ? ('Production job started: '+f.name+' ✓') : ('FAILED: '+f.name+' (server rejected type?)');
+ }catch(e){ pr.textContent='FAILED: '+f.name+' (network)'; }
+}
+async function send(files){
+ const b=document.getElementById('ubrief').value.trim();
+ const pl=[...document.querySelectorAll('.upf:checked')].map(x=>x.value).join(',');
+ const mx=document.getElementById('umix').checked;
+ for(const f of files){ await sendOne(f,b,pl,mx); }
+ setTimeout(()=>location.reload(), 1200);
 }
 uf.onchange=()=>send(uf.files);
 uz.ondragover=e=>{e.preventDefault()};
@@ -334,8 +358,11 @@ uz.ondrop=e=>{e.preventDefault();send(e.dataTransfer.files)};
                 f"<h3>{name}</h3><div class=meta>updated {_ago(j['updated'])}"
                 + (f" · {' · '.join(_esc(f) for f in flags)}" if flags else "")
                 + f"</div>{thumb}"
-                f'<div class=row><a class=btn pri href="/job/{name}">Open</a>'
+                + (f"<pre style='margin-top:8px;max-height:120px'>{_esc(j['failed'])}</pre>"
+                   if st == "failed" and j["failed"] else "")
+                + f'<div class=row><a class=btn pri href="/job/{name}">Open</a>'
                 + (f'<a class=btn href="/job/{name}?tab=review">Review page</a>' if j["ready"] else "")
+                + f'<form method=post action="/job/{name}/delete" onsubmit="return confirm(\'Delete this job and its files?\')"><button class=btn>🗑</button></form>'
                 + "</div></div>"
             )
         parts.append("</div>")
@@ -392,9 +419,21 @@ async def job_page(name: str, tab: str = "outputs"):
             parts.append("<div class=card>No post pack yet.</div>")
 
     elif tab == "logs":
+        texts = []
         log = ready / "pipeline.log" if ready.is_dir() else None
         if log and log.exists():
-            parts.append(f"<pre>{_esc(log.read_text(encoding='utf-8', errors='replace')[-20000:])}</pre>")
+            texts.append("== pipeline.log ==\n" + log.read_text(encoding="utf-8", errors="replace")[-20000:])
+        sfail = ready / "studio" / "studio.failed"
+        if sfail.exists():
+            texts.append("== studio failure ==\n" + sfail.read_text(encoding="utf-8", errors="replace")[-4000:])
+        spost = ready / "studio" / "postiz.txt"
+        if spost.exists():
+            texts.append("== postiz ==\n" + spost.read_text(encoding="utf-8", errors="replace"))
+        srun = ready / "studio" / "postiz_run.log"
+        if srun.exists():
+            texts.append("== last send-to-postiz run ==\n" + srun.read_text(encoding="utf-8", errors="replace")[-2000:])
+        if texts:
+            parts.append(f"<pre>{_esc(chr(10).join(texts))}</pre>")
         else:
             parts.append("<div class=card>No log yet.</div>")
 
@@ -414,6 +453,9 @@ async def job_page(name: str, tab: str = "outputs"):
     parts.append(
         f'<div class=row style=margin-top:24px>'
         f'<form method=post action="/job/{_esc(safe)}/retry"><button class=btn>↻ Re-edit (clear status, re-run)</button></form>'
+        f'<form method=post action="/job/{_esc(safe)}/postiz"><button class="btn pri">➤ Send to Postiz drafts</button></form>'
+        f'<a class=btn href="https://postiz.nimaataie.com/launches?showDrafts=true" target=_blank>Open Postiz drafts ↗</a>'
+        f'<form method=post action="/job/{_esc(safe)}/delete" onsubmit="return confirm(\'Delete this job, its outputs and its raw file? This cannot be undone.\')"><button class=btn>🗑 Delete</button></form>'
         f"</div></main></body></html>"
     )
     return "".join(parts)
@@ -429,6 +471,57 @@ async def job_retry(name: str):
             p.unlink()
     # If the raw file was consumed/renamed, keep it — autopilot rescans every 30s.
     return RedirectResponse(f"/job/{safe}", status_code=303)
+
+
+def _studio_key() -> str:
+    unit = Path.home() / ".config/systemd/user/content-studio.service"
+    try:
+        for line in unit.read_text().splitlines():
+            m = re.match(r"Environment=POSTIZ_API_KEY=(\S+)", line)
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return ""
+
+
+@app.post("/job/{name}/postiz")
+async def job_postiz(name: str):
+    safe = Path(name).name
+    job = READY / safe / "studio"
+    if not (job / "plan.json").exists():
+        return RedirectResponse(f"/job/{safe}?tab=logs", status_code=303)
+    script = (
+        "import json,sys;"
+        "sys.path.insert(0,'/home/cyrusminer/content-engine/ai-video-editor/studio');"
+        "import studio; from pathlib import Path;"
+        f"job=Path({str(job)!r});"
+        "plan=json.loads((job/'plan.json').read_text());"
+        "r=studio.create_postiz_drafts(job,plan,[]);"
+        "(job/'postiz.txt').write_text(r); print(r)"
+    )
+    env = {**os.environ, "POSTIZ_API_KEY": _studio_key(),
+           "CONTENT_ROOT": str(CONTENT_ROOT),
+           "STUDIO_QWEN": "huihui_ai/Qwen3.8-abliterated:latest"}
+    try:
+        r = subprocess.run(["/home/cyrusminer/content-engine/ai-video-editor/.venv/bin/python",
+                            "-c", script], capture_output=True, text=True, timeout=900, env=env)
+        (job / "postiz_run.log").write_text(r.stdout + "\n" + r.stderr[-2000:], encoding="utf-8")
+    except Exception as exc:
+        (job / "postiz_run.log").write_text(str(exc), encoding="utf-8")
+    return RedirectResponse(f"/job/{safe}?tab=logs", status_code=303)
+
+
+@app.post("/job/{name}/delete")
+async def job_delete(name: str):
+    safe = Path(name).name
+    for d in (READY / safe, UPLOAD / safe, PUBLISHED / safe):
+        if d.exists():
+            shutil.rmtree(d)
+    for f in RAW.glob(f"{safe}.*"):
+        if f.is_file():
+            f.unlink()
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/upload")
@@ -452,6 +545,53 @@ async def upload(file: UploadFile = File(...), brief: str = Form(""), platforms:
     if platforms.strip():
         (RAW / f"{dest.stem}.platforms.txt").write_text(platforms.strip(), encoding="utf-8")
     return {"queued": dest.name, "mode": "studio"}
+
+
+@app.post("/upload/chunk")
+async def upload_chunk(file: UploadFile = File(...), uuid: str = Form(...), index: int = Form(...)):
+    d = CHUNK_DIR / Path(uuid).name
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"{index:06d}.part"
+    with dest.open("wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    return {"ok": True, "index": index}
+
+
+@app.post("/upload/complete")
+async def upload_complete(uuid: str = Form(...), filename: str = Form(...),
+                          brief: str = Form(""), platforms: str = Form(""), mix: str = Form("")):
+    d = CHUNK_DIR / Path(uuid).name
+    if not d.is_dir():
+        return JSONResponse({"error": "no chunks for this upload"}, status_code=400)
+    name = Path(filename or "upload.mp4").name
+    if Path(name).suffix.lower() not in VIDEO_EXT:
+        shutil.rmtree(d, ignore_errors=True)
+        return JSONResponse({"error": f"unsupported type {Path(name).suffix}"}, status_code=400)
+    parts = sorted(d.glob("*.part"))
+    if not parts:
+        return JSONResponse({"error": "no chunk parts"}, status_code=400)
+    RAW.mkdir(parents=True, exist_ok=True)
+    dest = RAW / name
+    base, suf = dest.stem, dest.suffix
+    i = 1
+    while dest.exists():
+        dest = RAW / f"{base}-{i}{suf}"
+        i += 1
+    with dest.open("wb") as out:
+        for p in parts:
+            with p.open("rb") as fh:
+                shutil.copyfileobj(fh, out)
+    shutil.rmtree(d, ignore_errors=True)
+    stem = dest.stem
+    if mix.strip():
+        (RAW / f"{stem}.mix").write_text("web\n")
+    else:
+        (RAW / f"{stem}.studio").write_text("web\n")
+    if brief.strip():
+        (RAW / f"{stem}.brief.txt").write_text(brief.strip(), encoding="utf-8")
+    if platforms.strip():
+        (RAW / f"{stem}.platforms.txt").write_text(platforms.strip(), encoding="utf-8")
+    return {"queued": dest.name, "mode": "mix" if mix.strip() else "studio"}
 
 
 @app.get("/files/{path:path}")
