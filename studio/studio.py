@@ -53,10 +53,10 @@ VIDEO_EXT = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm",
              ".3gp", ".wmv", ".flv", ".m2ts", ".mpeg", ".mpg"}
 STABLE_SECONDS = 10          # mtime must not change for this long
 MIN_DURATION = 2.0           # anything shorter is rejected
-SHORT_MAX = 15.0             # clips at or under this length are "shorts" (mixable)
+MIX_MAX = 60.0               # clips up to this length can be mixed together
 MIN_SCENE = 2.0
-MAX_SCENES = 10
-CLIP_TARGET = 4.0            # seconds per selected scene
+MAX_SCENES = 8
+CLIP_TARGET = 8.0            # seconds per selected scene (long scenes)
 MASTER = (1920, 1080)
 VERTICAL = (1080, 1920)
 MUSIC_DIR = Path(os.environ.get("STUDIO_MUSIC", HERE / "assets" / "music"))
@@ -112,14 +112,18 @@ def scene_cuts(path: Path, duration: float) -> list[float]:
     return cuts
 
 
-def pick_clips(cuts: list[float]) -> list[tuple[float, float, float]]:
-    """(start, end, midpoint) per scene, trimmed to CLIP_TARGET around midpoint."""
+def pick_clips(cuts: list[float], duration: float) -> list[tuple[float, float, float]]:
+    """(start, end, midpoint). Videos up to 45s stay whole so no good
+    machinery/infrastructure moment is ever cut. Longer videos keep full
+    scenes trimmed only to CLIP_TARGET around each scene midpoint."""
+    if duration <= 45.0:
+        return [(0.0, round(duration, 2), round(duration / 2, 2))]
     clips = []
     for i in range(len(cuts) - 1):
         s, e = cuts[i], cuts[i + 1]
         mid = (s + e) / 2
         cs, ce = max(s, mid - CLIP_TARGET / 2), min(e, mid + CLIP_TARGET / 2)
-        if ce - cs >= 1.0:
+        if ce - cs >= 2.0:
             clips.append((round(cs, 2), round(ce, 2), round((cs + ce) / 2, 2)))
     return clips[:MAX_SCENES]
 
@@ -146,33 +150,42 @@ def load_facts() -> str:
 def build_plan(duration: float, n_clips: int, brief: str, facts: str) -> dict:
     system = (
         "You are the content strategist of CyrusMiner, a Dubai mining infrastructure "
-        "company. Write for short-form social video that gets saved and shared. Rules: "
-        "plain confident English, short sentences. Educate, never sell. No calls to "
-        "buy, invest or contact. No em dashes. No AI words like delve, unleash, "
+        "company. Think like a strategist first: pick the strongest angle for this "
+        "footage, then adapt the same core message to each platform in its own voice. "
+        "Rules: plain confident English, short sentences. Educate, never sell. No calls "
+        "to buy, invest or contact. No em dashes. No AI words like delve, unleash, "
         "elevate, game-changer, revolutionize. Never invent numbers or claims. Use "
         "ONLY these approved facts when mentioning the company: "
         + facts.replace("\n", " ")
     )
     user = (
         f"Raw footage: {duration:.0f}s of mining-facility video, no speech. "
-        f"I will cut it into {n_clips} scenes of about {CLIP_TARGET:.0f}s each.\n"
+        f"It will be shown as {n_clips} segment(s).\n"
         + (f"CREATIVE DIRECTION from client: {brief}\nFollow it for style, mood and emphasis.\n"
            if brief else "No direction given: choose a professional cinematic corporate angle.\n")
         + 'Reply with ONLY valid JSON (no markdown fences): '
-          '{"title": "short video title", "hook": "one line opening caption (max 8 words)", '
+          '{"strategy": "one sentence: the angle you chose and why it fits this footage", '
+          '"title": "short video title", '
+          '"hook": "one line opening caption (max 8 words)", '
           '"cta": "one line closing caption (max 8 words)", '
           '"scenes": ["caption for scene 1", ...], '
-          '"youtube": {"title": "...", "description": "2-3 plain sentences plus hashtags"}, '
+          '"youtube": {"title": "searchable informative title", "description": "2-3 plain sentences plus hashtags"}, '
+          '"shorts": {"title": "hooky title under 60 characters", "description": "one punchy line plus 3 hashtags"}, '
+          '"instagram": {"caption": "2 short lines, then 5 hashtags on the last line"}, '
+          '"tiktok": {"caption": "short trend-style caption plus 4 hashtags"}, '
           '"x": "post text <= 250 chars", '
-          '"telegram": "caption text", '
-          '"mastodon": "caption text"}\n'
+          '"mastodon": "caption text", '
+          '"linkedin": "2-3 sober professional sentences, no hashtags"}\n'
           f'"scenes" must have exactly {n_clips} entries, each max 8 words, '
           "concrete, about what is visible (machines, cooling, technicians, facility). "
-          "hashtags: 4-6 like #BitcoinMining #CyrusMiner #Dubai #CryptoMining"
+          "YouTube copy is informative and searchable. Shorts, TikTok and Instagram "
+          "copy is punchy and trend aware. LinkedIn copy is professional. "
+          "Hashtags like #BitcoinMining #CyrusMiner #Dubai #CryptoMining"
     )
     raw = qwen_chat(system, user)
     m = re.search(r"\{.*\}", raw, re.S)
     plan = json.loads(m.group(0), strict=False) if m else {}
+    plan.setdefault("strategy", "Professional look inside a working mining facility.")
     plan.setdefault("title", "CyrusMiner Facility Update")
     plan.setdefault("hook", "Inside our mining facility")
     plan.setdefault("cta", "CyrusMiner. Dubai since 2016.")
@@ -211,8 +224,10 @@ def esc(t: str) -> str:
 
 
 def render(job: Path, src: Path, clips, plan: dict, vertical: bool, music: Path | None) -> Path:
-    """Logo-only branded video. Output orientation = source orientation.
-    Full frame fit on blurred bg (no zoom, nothing cut). Max quality encode."""
+    """Branded video in the requested orientation. Full frame always visible
+    (fit, never crop) so no machine or infrastructure shot is lost. Any aspect
+    gap gets a subtle dark blurred backdrop. Persistent logo + website mark.
+    Hype music stays clearly audible under the original voice."""
     W, H = VERTICAL if vertical else MASTER
     tag = "vertical" if vertical else "master"
     out = job / f"{tag}.mp4"
@@ -223,7 +238,8 @@ def render(job: Path, src: Path, clips, plan: dict, vertical: bool, music: Path 
     filters = []
     for i in range(n):
         filters.append(
-            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=42[bg{i}];"
+            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+            f"gblur=sigma=16,eq=brightness=-0.15[bg{i}];"
             f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,setsar=1[fg{i}];"
             f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p,setsar=1[s{i}]")
     filters.append("".join(f"[s{i}]" for i in range(n)) +
@@ -234,13 +250,18 @@ def render(job: Path, src: Path, clips, plan: dict, vertical: bool, music: Path 
     filters.append(f"[{n}:v]scale={W}:{H},setsar=1,fps=30,format=yuv420p[op]")
     filters.append(f"[{n + 1}:v]scale={W}:{H},setsar=1,fps=30,format=yuv420p[cl]")
     filters.append("[op][body][cl]concat=n=3:v=1:a=0[full]")
-    # watermark (bottom-right), then fades. No text anywhere.
+    # persistent brand mark: logo bottom right, website bottom left.
+    fsz = max(26, int(H * 0.026))
+    mx, mb = int(W * 0.035), int(H * 0.035)
     if LOGO.exists():
-        filters.append(f"movie={LOGO}[logo];[logo]scale={int(W * 0.07)}:-1[lg]")
-        filters.append(f"[full][lg]overlay=W-w-{int(W * 0.03)}:H-h-{int(H * 0.03)}"
-                       f",fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
+        filters.append(f"movie={LOGO}[logo];[logo]scale={int(W * 0.08)}:-1[lg]")
+        stack = f"[full][lg]overlay=W-w-{mx}:H-h-{mb}"
     else:
-        filters.append(f"[full]fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
+        stack = "[full]null"
+    filters.append(
+        f"{stack},drawtext=fontfile={FONT}:text='www.cyrusminer.com':fontcolor=0xD4AF37:"
+        f"fontsize={fsz}:x={mx}:y=h-{mb}-th-8,"
+        f"fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
     # inputs: clips, open, close, [music], [silence, silence if voice]
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for (s, e, _m) in clips:
@@ -258,17 +279,18 @@ def render(job: Path, src: Path, clips, plan: dict, vertical: bool, music: Path 
         filters.append("".join(f"[a{i}]" for i in range(n)) +
                        f"concat=n={n}:v=0:a=1[abody]")
         if music:
-            filters.append(f"[{mi}:a]atrim=0:{total:.2f},aresample=48000[mus]")
+            # gentle ducking: music stays audible, voice stays on top
+            filters.append(f"[{mi}:a]atrim=0:{total:.2f},volume=1.2,aresample=48000[mus]")
             filters.append("[abody]asplit[vd][vs];"
-                           "[mus][vd]sidechaincompress=threshold=0.03:ratio=12:attack=20:release=600[musd];"
-                           "[vs][musd]amix=inputs=2:duration=first[aoutbody]")
+                           "[mus][vd]sidechaincompress=threshold=0.09:ratio=2.5:attack=15:release=450[musd];"
+                           "[vs][musd]amix=inputs=2:duration=first:normalize=0[aoutbody]")
         else:
             filters.append("[abody]anull[aoutbody]")
         sa, sb = mi + 1, mi + 2
         filters.append(f"[{sa}:a]aresample=48000[sa];[{sb}:a]aresample=48000[sb];"
                        f"[sa][aoutbody][sb]concat=n=3:v=0:a=1[aout]")
     elif music:
-        filters.append(f"[{mi}:a]atrim=0:{total:.2f},volume=1.0,aresample=48000[musv]")
+        filters.append(f"[{mi}:a]atrim=0:{total:.2f},volume=1.2,aresample=48000[musv]")
         cmd += ["-f", "lavfi", "-t", "2.2", "-i", "anullsrc=r=48000:cl=stereo",
                 "-f", "lavfi", "-t", "2.6", "-i", "anullsrc=r=48000:cl=stereo"]
         sa, sb = mi + 1, mi + 2
@@ -322,6 +344,20 @@ def postiz(path: str, key: str, payload: dict | None = None, files: dict | None 
     return r
 
 
+# platform -> (postiz integration identifier, media file that fits the platform)
+PLATFORMS = {
+    "youtube":   ("youtube", "master.mp4"),
+    "shorts":    ("youtube", "vertical.mp4"),
+    "x":         ("x", "vertical.mp4"),
+    "mastodon":  ("mastodon", "vertical.mp4"),
+    "instagram": ("instagram", "vertical.mp4"),
+    "tiktok":    ("tiktok", "vertical.mp4"),
+    "linkedin":  ("linkedin", "master.mp4"),
+    "facebook":  ("facebook", "master.mp4"),
+}
+DEFAULT_PLATFORMS = ["youtube", "shorts", "x", "mastodon"]
+
+
 def create_postiz_drafts(job: Path, plan: dict, platforms: list[str]) -> str:
     if not POSTIZ_KEY:
         return "no POSTIZ_API_KEY set; skipped"
@@ -330,38 +366,47 @@ def create_postiz_drafts(job: Path, plan: dict, platforms: list[str]) -> str:
     h = {"Authorization": POSTIZ_KEY}
     ints = rq.get(f"{POSTIZ}/api/public/v1/integrations", headers=h, timeout=30).json()
     have = {i["identifier"].lower(): i["id"] for i in ints}
-    wanted = [p.strip().lower() for p in platforms] if platforms else ["youtube", "x", "mastodon"]
+    wanted = [p.strip().lower() for p in platforms if p.strip()] or DEFAULT_PLATFORMS
     uploads = {}
-    for name in ("master.mp4", "thumbnail.jpg"):
+    for name in ("master.mp4", "vertical.mp4", "thumbnail.jpg"):
         p = job / name
         if p.exists():
+            mime = "video/mp4" if p.suffix == ".mp4" else "image/jpeg"
             r = postiz("/api/public/v1/media", POSTIZ_KEY,
-                       files={"file": (name, open(p, "rb"), "video/mp4" if p.suffix == ".mp4" else "image/jpeg")})
+                       files={"file": (name, open(p, "rb"), mime)})
             if r.ok:
                 j = r.json()
                 uploads[name] = {"id": str(j.get("id") or name), "path": j["path"]}
     date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     made = []
     for plat in wanted:
-        if plat not in have:
+        ident, media_name = PLATFORMS.get(plat, (plat, "vertical.mp4"))
+        if ident not in have:
+            made.append(f"{plat}:skipped(not connected)")
             continue
         copy = plan.get(plat) or {}
-        if plat == "youtube":
-            text = copy.get("description", "")
-            settings = {"__type": "youtube", "title": copy.get("title", plan["title"]),
+        media = [uploads[media_name]] if media_name in uploads else []
+        if ident == "youtube":
+            title = copy.get("title", plan["title"]) if isinstance(copy, dict) else plan["title"]
+            text = copy.get("description", "") if isinstance(copy, dict) else str(copy or "")
+            settings = {"__type": "youtube", "title": title,
                         "type": "public", "selfDeclaredMadeForKids": "no", "tags": []}
-            if "thumbnail.jpg" in uploads:
+            if plat == "youtube" and "thumbnail.jpg" in uploads:
                 settings["thumbnail"] = uploads["thumbnail.jpg"]
-            media = [uploads["master.mp4"]] if "master.mp4" in uploads else []
+            if not media and "master.mp4" in uploads:
+                media = [uploads["master.mp4"]]
         else:
-            text = copy.get("text", "") if isinstance(copy, dict) else str(copy)
-            settings = {"__type": plat}
-            if plat == "x":
+            if isinstance(copy, dict):
+                text = copy.get("text") or copy.get("caption") or copy.get("description") or ""
+            else:
+                text = str(copy or "")
+            settings = {"__type": ident}
+            if ident == "x":
                 settings["who_can_reply_post"] = "everyone"
-            media = ([uploads["master.mp4"]] if "master.mp4" in uploads
-                     else [uploads["thumbnail.jpg"]] if "thumbnail.jpg" in uploads else [])
+            if not media and "vertical.mp4" in uploads:
+                media = [uploads["vertical.mp4"]]
         payload = {"type": "draft", "shortLink": False, "date": date, "tags": [],
-                   "posts": [{"integration": {"id": have[plat]},
+                   "posts": [{"integration": {"id": have[ident]},
                               "value": [{"content": text, "image": media}],
                               "settings": settings}]}
         r = postiz("/api/public/v1/posts", POSTIZ_KEY, payload=payload)
@@ -415,7 +460,7 @@ def run_job(stem: str, video: Path, brief: str, platforms: list[str]) -> bool:
         if duration < MIN_DURATION:
             raise RuntimeError(f"video shorter than {MIN_DURATION:.0f} seconds")
         cuts = scene_cuts(video, duration)
-        clips = pick_clips(cuts)
+        clips = pick_clips(cuts, duration)
         facts = load_facts()
         plan_file = job / "plan.json"
         if plan_file.exists():
@@ -425,13 +470,13 @@ def run_job(stem: str, video: Path, brief: str, platforms: list[str]) -> bool:
             plan_file.write_text(json.dumps(plan, indent=2))
         while len(plan.get("scenes", [])) < len(clips):
             plan.setdefault("scenes", []).append("CyrusMiner operations")
-        w, h = probe_size(video)
-        vertical = h > w
-        master = render(job, video, clips, plan, vertical, pick_music())
-        vert = None  # single output, matched to source orientation
+        music = pick_music()
+        master = render(job, video, clips, plan, False, music)   # 1920x1080
+        vert = render(job, video, clips, plan, True, music)      # 1080x1920
         thumb = make_thumbnail(job, video, clips, plan)
         (job / "postcopy.json").write_text(json.dumps(
-            {k: plan[k] for k in ("title", "hook", "cta", "youtube", "x", "telegram", "mastodon")
+            {k: plan[k] for k in ("strategy", "title", "hook", "cta", "youtube", "shorts",
+                                  "instagram", "tiktok", "x", "mastodon", "linkedin")
              if k in plan}, indent=2))
         stage = UPLOAD / stem
         stage.mkdir(parents=True, exist_ok=True)
@@ -477,7 +522,7 @@ def process(video: Path) -> bool:
 
 
 def process_mix(marker: Path) -> bool:
-    """Merge all short clips (2-15s) currently in RAW into one branded video."""
+    """Merge all mix-marked clips (2-60s) currently in RAW into one branded video."""
     vids: list[Path] = []
     for f in sorted(RAW.iterdir()):
         if not (f.is_file() and f.suffix.lower() in VIDEO_EXT and not f.name.startswith(".")):
@@ -487,11 +532,11 @@ def process_mix(marker: Path) -> bool:
         if (READY / f.stem / "studio" / "studio.done").exists():
             continue  # already produced individually
         d = ffprobe_duration(f)
-        if MIN_DURATION <= d <= SHORT_MAX:
+        if MIN_DURATION <= d <= MIX_MAX:
             vids.append(f)
     vids = [v for v in vids if stable(v)]
     if len(vids) < 2:
-        log("mix: need at least 2 short clips (2-15s); marker kept for later")
+        log("mix: need at least 2 marked clips (2-60s); marker kept for later")
         return False
     stem = "mix-" + time.strftime("%Y%m%d-%H%M%S")
     job = READY / stem / "studio"

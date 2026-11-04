@@ -392,10 +392,37 @@ async def job_page(name: str, tab: str = "outputs"):
                  f'<a href="/job/{_esc(safe)}" class={"on" if tab=="outputs" else ""}>Outputs</a>'
                  f'<a href="/job/{_esc(safe)}?tab=review" class={"on" if tab=="review" else ""}>Review page</a>'
                  f'<a href="/job/{_esc(safe)}?tab=copy" class={"on" if tab=="copy" else ""}>Post copy</a>'
+                 f'<a href="/job/{_esc(safe)}?tab=plan" class={"on" if tab=="plan" else ""}>Strategy</a>'
                  f'<a href="/job/{_esc(safe)}?tab=logs" class={"on" if tab=="logs" else ""}>Logs</a>'
                  "</div>")
 
-    if tab == "review":
+    if tab == "plan":
+        plan_f = ready / "studio" / "plan.json"
+        err_f = ready / "studio" / "plan_error.txt"
+        if plan_f.exists():
+            try:
+                pretty = json.dumps(json.loads(plan_f.read_text(encoding="utf-8")),
+                                    indent=2, ensure_ascii=False)
+            except Exception:
+                pretty = plan_f.read_text(encoding="utf-8", errors="replace")
+            parts.append(
+                "<div class=card><div class=meta>Strategist output. Edit the strategy or any "
+                "platform copy, save, then use Send to Postiz drafts. Sending again creates "
+                "new drafts, so delete the old ones in Postiz if you edit.</div>"
+                f"<form method=post action='/job/{_esc(safe)}/plan'>"
+                "<textarea name=plan style='width:100%;min-height:56vh;background:#0e1114;"
+                "color:#b9c2cf;border:1px solid var(--line);border-radius:10px;padding:12px;"
+                "font-size:12px;font-family:ui-monospace,Menlo,monospace'>"
+                f"{_esc(pretty)}</textarea>"
+                "<div class=row><button class='btn pri'>Save strategy</button></div>"
+                "</form></div>")
+            if err_f.exists():
+                parts.append(f"<pre>{_esc(err_f.read_text(encoding='utf-8', errors='replace'))}</pre>")
+                err_f.unlink()
+        else:
+            parts.append("<div class=card>No strategy yet — it appears when the studio run finishes.</div>")
+
+    elif tab == "review":
         review = None
         if ready.is_dir():
             cands = list(ready.rglob("review.html"))
@@ -459,6 +486,21 @@ async def job_page(name: str, tab: str = "outputs"):
         f"</div></main></body></html>"
     )
     return "".join(parts)
+
+
+@app.post("/job/{name}/plan")
+async def job_plan_save(name: str, plan: str = Form(...)):
+    safe = Path(name).name
+    job = READY / safe / "studio"
+    job.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(plan)
+        (job / "plan.json").write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                                       encoding="utf-8")
+        (job / "plan_error.txt").unlink(missing_ok=True)
+    except Exception as exc:
+        (job / "plan_error.txt").write_text(f"JSON not saved: {exc}", encoding="utf-8")
+    return RedirectResponse(f"/job/{safe}?tab=plan", status_code=303)
 
 
 @app.post("/job/{name}/retry")
