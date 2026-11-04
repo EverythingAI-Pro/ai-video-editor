@@ -25,7 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -47,13 +49,19 @@ FACTS = Path(os.environ.get("STUDIO_FACTS", HERE / "facts.yaml"))
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 GOLD = "#D4AF37"
 BLACK = "#0A0A0A"
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
+VIDEO_EXT = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm",
+             ".3gp", ".wmv", ".flv", ".m2ts", ".mpeg", ".mpg"}
 STABLE_SECONDS = 10          # mtime must not change for this long
+MIN_DURATION = 2.0           # anything shorter is rejected
+SHORT_MAX = 15.0             # clips at or under this length are "shorts" (mixable)
 MIN_SCENE = 2.0
 MAX_SCENES = 10
 CLIP_TARGET = 4.0            # seconds per selected scene
 MASTER = (1920, 1080)
 VERTICAL = (1080, 1920)
+MUSIC_DIR = Path(os.environ.get("STUDIO_MUSIC", HERE / "assets" / "music"))
+CALENDAR = Path(os.environ.get("STUDIO_CALENDAR", HERE / "content_calendar.json"))
+CAL_STATE = HERE / ".calendar_state.json"
 
 
 def log(msg: str) -> None:
@@ -99,6 +107,8 @@ def scene_cuts(path: Path, duration: float) -> list[float]:
     if len(cuts) < 3:  # static footage: even segments
         n = max(3, min(MAX_SCENES, int(duration // CLIP_TARGET)))
         cuts = [duration * i / n for i in range(n)] + [duration]
+    if duration < 8:  # short clip: keep it as one scene, never chop it up
+        cuts = [0.0, duration]
     return cuts
 
 
@@ -135,11 +145,12 @@ def load_facts() -> str:
 
 def build_plan(duration: float, n_clips: int, brief: str, facts: str) -> dict:
     system = (
-        "You are the creative director of CyrusMiner, a Dubai mining company. "
-        "Write for short-form corporate video. Rules: plain confident English, short "
-        "sentences. Never use em dashes. Never use AI words like delve, unleash, "
-        "elevate, game-changer, revolutionize. Never invent numbers, capacity, specs "
-        "or claims. Use ONLY these approved facts when mentioning the company: "
+        "You are the content strategist of CyrusMiner, a Dubai mining infrastructure "
+        "company. Write for short-form social video that gets saved and shared. Rules: "
+        "plain confident English, short sentences. Educate, never sell. No calls to "
+        "buy, invest or contact. No em dashes. No AI words like delve, unleash, "
+        "elevate, game-changer, revolutionize. Never invent numbers or claims. Use "
+        "ONLY these approved facts when mentioning the company: "
         + facts.replace("\n", " ")
     )
     user = (
@@ -161,7 +172,7 @@ def build_plan(duration: float, n_clips: int, brief: str, facts: str) -> dict:
     )
     raw = qwen_chat(system, user)
     m = re.search(r"\{.*\}", raw, re.S)
-    plan = json.loads(m.group(0)) if m else {}
+    plan = json.loads(m.group(0), strict=False) if m else {}
     plan.setdefault("title", "CyrusMiner Facility Update")
     plan.setdefault("hook", "Inside our mining facility")
     plan.setdefault("cta", "CyrusMiner. Dubai since 2016.")
@@ -172,84 +183,104 @@ def build_plan(duration: float, n_clips: int, brief: str, facts: str) -> dict:
 
 # ---------------------------------------------------------------- render
 
-def branded_frame(out: Path, size: tuple[int, int], line1: str, line2: str = "") -> Path:
-    from PIL import Image, ImageDraw, ImageFont
+def branded_frame(out: Path, size: tuple[int, int]) -> Path:
+    """Logo-only branded card. No text on video, ever."""
+    from PIL import Image
     w, h = size
     img = Image.new("RGB", (w, h), BLACK)
-    dr = ImageDraw.Draw(img)
-    f_big = ImageFont.truetype(FONT, int(h * 0.075))
-    f_sm = ImageFont.truetype(FONT, int(h * 0.032))
     if LOGO.exists():
-        logo = Image.open(LOGO).convert("RGBA").resize((int(h * 0.22), int(h * 0.22)))
-        img.paste(logo, ((w - logo.width) // 2, int(h * 0.24)), logo)
-    y = h * 0.56
-    for txt, fnt in ((line1, f_big), (line2, f_sm)):
-        if not txt:
-            continue
-        bb = dr.textbbox((0, 0), txt, font=fnt)
-        dr.text(((w - (bb[2] - bb[0])) / 2, y), txt, font=fnt, fill=GOLD)
-        y += (bb[3] - bb[1]) * 1.9
+        logo = Image.open(LOGO).convert("RGBA").resize((int(h * 0.34), int(h * 0.34)))
+        img.paste(logo, ((w - logo.width) // 2, (h - logo.height) // 2), logo)
     img.save(out)
     return out
+
+
+def pick_music() -> Path | None:
+    tracks = sorted(MUSIC_DIR.glob("*.mp3")) if MUSIC_DIR.exists() else []
+    return random.choice(tracks) if tracks else None
+
+
+def has_audio(path: Path) -> bool:
+    r = sh(["ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)])
+    return bool(r.stdout.strip())
 
 
 def esc(t: str) -> str:
     return t.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def render(job: Path, src: Path, clips, plan: dict, vertical: bool) -> Path:
-    """Assemble branded video. Returns output path."""
+def render(job: Path, src: Path, clips, plan: dict, vertical: bool, music: Path | None) -> Path:
+    """Logo-only branded video. Output orientation = source orientation.
+    Full frame fit on blurred bg (no zoom, nothing cut). Max quality encode."""
     W, H = VERTICAL if vertical else MASTER
     tag = "vertical" if vertical else "master"
     out = job / f"{tag}.mp4"
     n = len(clips)
     body_len = sum(c[1] - c[0] for c in clips)
     total = 2.2 + body_len + 2.6
-    # scene normalization (cover crop) + concat body
+    voice = has_audio(src)
     filters = []
     for i in range(n):
         filters.append(
-            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},setsar=1,fps=30,format=yuv420p[s{i}]")
+            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=42[bg{i}];"
+            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,setsar=1[fg{i}];"
+            f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p,setsar=1[s{i}]")
     filters.append("".join(f"[s{i}]" for i in range(n)) +
                    f"concat=n={n}:v=1:a=0[body]")
-    # branded open/close frames
-    open_png = branded_frame(job / f"open_{tag}.png", (W, H), "CYRUSMINER", "www.cyrusminer.com")
-    close_png = branded_frame(job / f"close_{tag}.png", (W, H), plan["cta"].upper(), "CYRUSMINER · DUBAI · UAE")
+    # logo-only open/close cards
+    open_png = branded_frame(job / f"open_{tag}.png", (W, H))
+    close_png = branded_frame(job / f"close_{tag}.png", (W, H))
     filters.append(f"[{n}:v]scale={W}:{H},setsar=1,fps=30,format=yuv420p[op]")
     filters.append(f"[{n + 1}:v]scale={W}:{H},setsar=1,fps=30,format=yuv420p[cl]")
     filters.append("[op][body][cl]concat=n=3:v=1:a=0[full]")
-    # captions: hook on first scene, one caption per scene
-    fsize = int(H * (0.038 if vertical else 0.048))
-    y_main = int(H * (0.80 if vertical else 0.86))
-    hook_y = int(H * 0.12)
-    chain = "[full]"
-    texts = [(plan["hook"], hook_y, 2.2, clips[0][1] - clips[0][0])]
-    t_cursor = 2.2
-    for i, (s, e, _m) in enumerate(clips):
-        texts.append((plan["scenes"][i], y_main, t_cursor, e - s))
-        t_cursor += e - s
-    for i, (txt, y, start, dur) in enumerate(texts):
-        filters.append(
-            f"{chain}drawtext=fontfile={FONT}:text='{esc(txt)}':fontsize={fsize}:"
-            f"fontcolor={GOLD}:x=(w-text_w)/2:y={y}:box=1:boxcolor=black@0.45:"
-            f"boxborderw={int(fsize * 0.5)}:enable='between(t,{start:.2f},{start + dur:.2f})'[c{i}]")
-        chain = f"[c{i}]"
-    # watermark (bottom-right), then fades
+    # watermark (bottom-right), then fades. No text anywhere.
     if LOGO.exists():
-        filters.append(f"movie={LOGO}[logo];[logo]scale={int(W * 0.06)}:-1[lg]")
-        filters.append(f"{chain}[lg]overlay=W-w-{int(W * 0.03)}:H-h-{int(H * 0.03)}"
+        filters.append(f"movie={LOGO}[logo];[logo]scale={int(W * 0.07)}:-1[lg]")
+        filters.append(f"[full][lg]overlay=W-w-{int(W * 0.03)}:H-h-{int(H * 0.03)}"
                        f",fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
     else:
-        filters.append(f"{chain}fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
+        filters.append(f"[full]fade=t=in:st=0:d=0.6,fade=t=out:st={total - 0.8:.2f}:d=0.8[vout]")
+    # inputs: clips, open, close, [music], [silence, silence if voice]
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for (s, e, _m) in clips:
         cmd += ["-ss", str(s), "-t", str(e - s), "-i", str(src)]
     cmd += ["-loop", "1", "-t", "2.2", "-i", str(open_png),
             "-loop", "1", "-t", "2.6", "-i", str(close_png)]
-    cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", "-t", f"{total:.2f}", str(out)]
+    mi = n + 2
+    if music:
+        cmd += ["-stream_loop", "-1", "-i", str(music)]
+    if voice:
+        cmd += ["-f", "lavfi", "-t", "2.2", "-i", "anullsrc=r=48000:cl=stereo",
+                "-f", "lavfi", "-t", "2.6", "-i", "anullsrc=r=48000:cl=stereo"]
+        for i in range(n):
+            filters.append(f"[{i}:a]aresample=48000[a{i}]")
+        filters.append("".join(f"[a{i}]" for i in range(n)) +
+                       f"concat=n={n}:v=0:a=1[abody]")
+        if music:
+            filters.append(f"[{mi}:a]atrim=0:{total:.2f},aresample=48000[mus]")
+            filters.append("[abody]asplit[vd][vs];"
+                           "[mus][vd]sidechaincompress=threshold=0.03:ratio=12:attack=20:release=600[musd];"
+                           "[vs][musd]amix=inputs=2:duration=first[aoutbody]")
+        else:
+            filters.append("[abody]anull[aoutbody]")
+        sa, sb = mi + 1, mi + 2
+        filters.append(f"[{sa}:a]aresample=48000[sa];[{sb}:a]aresample=48000[sb];"
+                       f"[sa][aoutbody][sb]concat=n=3:v=0:a=1[aout]")
+    elif music:
+        filters.append(f"[{mi}:a]atrim=0:{total:.2f},volume=1.0,aresample=48000[musv]")
+        cmd += ["-f", "lavfi", "-t", "2.2", "-i", "anullsrc=r=48000:cl=stereo",
+                "-f", "lavfi", "-t", "2.6", "-i", "anullsrc=r=48000:cl=stereo"]
+        sa, sb = mi + 1, mi + 2
+        filters.append(f"[{sa}:a]aresample=48000[sa];[{sb}:a]aresample=48000[sb];"
+                       f"[sa][musv][sb]concat=n=3:v=0:a=1[aout]")
+    else:
+        cmd += ["-f", "lavfi", "-t", f"{total:.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        filters.append(f"[{mi}:a]anullsrc=r=48000:cl=stereo,atrim=0:{total:.2f}[aout]")
+    cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            "-t", f"{total:.2f}", str(out)]
     r = sh(cmd)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg render failed: {r.stderr[-2000:]}")
@@ -301,7 +332,7 @@ def create_postiz_drafts(job: Path, plan: dict, platforms: list[str]) -> str:
     have = {i["identifier"].lower(): i["id"] for i in ints}
     wanted = [p.strip().lower() for p in platforms] if platforms else ["youtube", "x", "mastodon"]
     uploads = {}
-    for name in ("master.mp4", "vertical.mp4", "thumbnail.jpg"):
+    for name in ("master.mp4", "thumbnail.jpg"):
         p = job / name
         if p.exists():
             r = postiz("/api/public/v1/media", POSTIZ_KEY,
@@ -327,8 +358,7 @@ def create_postiz_drafts(job: Path, plan: dict, platforms: list[str]) -> str:
             settings = {"__type": plat}
             if plat == "x":
                 settings["who_can_reply_post"] = "everyone"
-            vid = "vertical.mp4" if plat == "x" else "master.mp4"
-            media = ([uploads[vid]] if vid in uploads
+            media = ([uploads["master.mp4"]] if "master.mp4" in uploads
                      else [uploads["thumbnail.jpg"]] if "thumbnail.jpg" in uploads else [])
         payload = {"type": "draft", "shortLink": False, "date": date, "tags": [],
                    "posts": [{"integration": {"id": have[plat]},
@@ -339,8 +369,30 @@ def create_postiz_drafts(job: Path, plan: dict, platforms: list[str]) -> str:
     return ", ".join(made) or "no matching integrations"
 
 
-# ---------------------------------------------------------------- pipeline
+# ---------------------------------------------------------------- content calendar
 
+def next_topic() -> str:
+    """Next unused topic from the 30-day viral calendar (rotates)."""
+    try:
+        topics = json.loads(CALENDAR.read_text())
+    except Exception:
+        return ""
+    if not topics:
+        return ""
+    try:
+        state = json.loads(CAL_STATE.read_text())
+    except Exception:
+        state = {"next": 0}
+    idx = int(state.get("next", 0)) % len(topics)
+    t = topics[idx]
+    state["next"] = idx + 1
+    CAL_STATE.write_text(json.dumps(state))
+    return (f"TOPIC: {t.get('topic', '')}\n"
+            f"KEY FACT TO SHARE: {t.get('fact', '')}\n"
+            f"ANGLE: {t.get('angle', '')}")
+
+
+# ---------------------------------------------------------------- pipeline
 def stable(path: Path, seconds: int = STABLE_SECONDS) -> bool:
     try:
         s1 = (path.stat().st_size, path.stat().st_mtime)
@@ -351,23 +403,17 @@ def stable(path: Path, seconds: int = STABLE_SECONDS) -> bool:
         return False
 
 
-def process(video: Path) -> bool:
-    stem = video.stem
-    marker = RAW / f"{stem}.studio"
-    brief_file = RAW / f"{stem}.brief.txt"
-    plat_file = RAW / f"{stem}.platforms.txt"
+def run_job(stem: str, video: Path, brief: str, platforms: list[str]) -> bool:
     job = READY / stem / "studio"
     job.mkdir(parents=True, exist_ok=True)
     done = job / "studio.done"
     if done.exists():
         return False
     log(f"job {stem}: started")
-    brief = brief_file.read_text(encoding="utf-8", errors="replace").strip() if brief_file.exists() else ""
-    platforms = [p for p in plat_file.read_text().split(",")] if plat_file.exists() else []
     try:
         duration = ffprobe_duration(video)
-        if duration < 5:
-            raise RuntimeError("video shorter than 5 seconds")
+        if duration < MIN_DURATION:
+            raise RuntimeError(f"video shorter than {MIN_DURATION:.0f} seconds")
         cuts = scene_cuts(video, duration)
         clips = pick_clips(cuts)
         facts = load_facts()
@@ -379,8 +425,10 @@ def process(video: Path) -> bool:
             plan_file.write_text(json.dumps(plan, indent=2))
         while len(plan.get("scenes", [])) < len(clips):
             plan.setdefault("scenes", []).append("CyrusMiner operations")
-        master = render(job, video, clips, plan, vertical=False)
-        vert = render(job, video, clips, plan, vertical=True) if duration >= 15 else None
+        w, h = probe_size(video)
+        vertical = h > w
+        master = render(job, video, clips, plan, vertical, pick_music())
+        vert = None  # single output, matched to source orientation
         thumb = make_thumbnail(job, video, clips, plan)
         (job / "postcopy.json").write_text(json.dumps(
             {k: plan[k] for k in ("title", "hook", "cta", "youtube", "x", "telegram", "mastodon")
@@ -399,21 +447,101 @@ def process(video: Path) -> bool:
         (job / "studio.failed").write_text(str(exc))
         log(f"job {stem}: FAILED {exc}")
         return False
+
+
+def process(video: Path) -> bool:
+    stem = video.stem
+    marker = RAW / f"{stem}.studio"
+    brief_file = RAW / f"{stem}.brief.txt"
+    plat_file = RAW / f"{stem}.platforms.txt"
+    brief = brief_file.read_text(encoding="utf-8", errors="replace").strip() if brief_file.exists() else ""
+    if not brief:
+        brief = next_topic()
+    platforms = [p for p in plat_file.read_text().split(",")] if plat_file.exists() else []
+    try:
+        ok = run_job(stem, video, brief, platforms)
+        if ok:
+            archive = ROOT / "05_ARCHIVE"
+            archive.mkdir(exist_ok=True)
+            target = archive / video.name
+            i = 1
+            while target.exists():
+                target = archive / f"{video.stem}-{i}{video.suffix}"
+                i += 1
+            shutil.move(str(video), target)
+            for suffix in (".brief.txt", ".platforms.txt"):
+                (RAW / f"{stem}{suffix}").unlink(missing_ok=True)
+        return ok
     finally:
         marker.unlink(missing_ok=True)
+
+
+def process_mix(marker: Path) -> bool:
+    """Merge all short clips (2-15s) currently in RAW into one branded video."""
+    vids: list[Path] = []
+    for f in sorted(RAW.iterdir()):
+        if not (f.is_file() and f.suffix.lower() in VIDEO_EXT and not f.name.startswith(".")):
+            continue
+        if not (RAW / f"{f.stem}.mix").exists():
+            continue  # only clips the user marked for mixing
+        if (READY / f.stem / "studio" / "studio.done").exists():
+            continue  # already produced individually
+        d = ffprobe_duration(f)
+        if MIN_DURATION <= d <= SHORT_MAX:
+            vids.append(f)
+    vids = [v for v in vids if stable(v)]
+    if len(vids) < 2:
+        log("mix: need at least 2 short clips (2-15s); marker kept for later")
+        return False
+    stem = "mix-" + time.strftime("%Y%m%d-%H%M%S")
+    job = READY / stem / "studio"
+    job.mkdir(parents=True, exist_ok=True)
+    mixed = job / "mixed_source.mp4"
+    lst = job / "concat.txt"
+    lst.write_text("".join(f"file '{v.absolute()}'\n" for v in vids), encoding="utf-8")
+    r = sh(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(mixed)])
+    if r.returncode != 0 or not mixed.exists():
+        log(f"mix: concat failed: {r.stderr[-500:]}")
+        return False
+    brief = ""
+    for v in vids:
+        bf = RAW / f"{v.stem}.brief.txt"
+        if bf.exists() and bf.read_text(encoding="utf-8", errors="replace").strip():
+            brief = bf.read_text(encoding="utf-8", errors="replace").strip()
+            break
+    ok = run_job(stem, mixed, brief, [])
+    if ok:
+        archive = ROOT / "05_ARCHIVE"
+        archive.mkdir(exist_ok=True)
+        for v in vids:
+            for suffix in (".studio", ".mix", ".brief.txt", ".platforms.txt"):
+                (RAW / f"{v.stem}{suffix}").unlink(missing_ok=True)
+            shutil.move(str(v), archive / v.name)
+        marker.unlink(missing_ok=True)
+        log(f"mix: merged {len(vids)} clips -> {job}")
+    return ok
+
+
+def find_video(stem: str) -> Path | None:
+    for f in RAW.iterdir():
+        if f.is_file() and f.stem == stem and f.suffix.lower() in VIDEO_EXT:
+            return f
+    return None
 
 
 def scan_once() -> int:
     RAW.mkdir(parents=True, exist_ok=True)
     n = 0
+    for marker in sorted(RAW.glob("*.mix")):
+        try:
+            process_mix(marker)
+        except Exception as exc:
+            log(f"mix error: {exc}")
     for marker in sorted(RAW.glob("*.studio")):
-        video = RAW / (marker.stem + ".mp4")
-        if not video.exists():
-            for ext in VIDEO_EXT - {".mp4"}:
-                if (RAW / (marker.stem + ext)).exists():
-                    video = RAW / (marker.stem + ext)
-                    break
-        if video.exists() and stable(video):
+        video = find_video(marker.stem)
+        if video is not None and stable(video):
             if process(video):
                 n += 1
     return n
@@ -427,7 +555,7 @@ def main() -> int:
     if args.once:
         log(f"processed {scan_once()} job(s)")
         return 0
-    log(f"watching {RAW} for *.studio markers every {args.interval}s")
+    log(f"watching {RAW} for *.studio / *.mix markers every {args.interval}s")
     while True:
         try:
             scan_once()
