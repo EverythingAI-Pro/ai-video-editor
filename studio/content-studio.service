@@ -1,0 +1,19 @@
+[Unit]
+Description=CyrusMiner Content Studio (silent-footage production)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyrusminer/content-engine/ai-video-editor
+Environment=PYTHONUNBUFFERED=1
+Environment=CONTENT_ROOT=/home/cyrusminer/content-system
+Environment=STUDIO_QWEN=huihui_ai/Qwen3.8-abliterated:latest
+# Get the key from Postiz: Settings -> Agents / Dev -> API Key
+Environment=POSTIZ_API_KEY=
+ExecStart=/home/cyrusminer/content-engine/ai-video-editor/.venv/bin/python /home/cyrusminer/content-engine/ai-video-editor/studio/studio.py --interval 30
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
